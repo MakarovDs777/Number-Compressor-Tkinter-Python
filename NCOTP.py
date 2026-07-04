@@ -1,9 +1,9 @@
-
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import numpy as np
 from PIL import Image, ImageTk
 import os
+import re
 
 # Глобальные переменные
 image_data = None
@@ -12,75 +12,85 @@ current_width = None
 current_height = None
 
 
-# ------------------------------------------------------------
-#  КОДИРОВАНИЕ / ДЕКОДИРОВАНИЕ  (кортежный формат)
-# ------------------------------------------------------------
+# ============================================================
+#  СЖАТИЕ / РАЗЖАТИЕ — «кортежный» формат
+# ============================================================
+#
+#  Идея:
+#    Вход:  числа через пробел, например:
+#           "252 1 253 5 128 3"
+#
+#    Сжатие:
+#      - Многозначные (>9) остаются как есть.
+#      - Однозначные (0–9) заменяются на Q0..Q9,
+#        а пробел ПЕРЕД таким числом удаляется.
+#      - Результат — сплошная строка без пробелов:
+#           "252Q1253Q5128Q3"
+#
+#    Разжатие:
+#      - "252Q1253Q5128Q3" -> "252 1 253 5 128 3"
+# ============================================================
 
-# Таблица для однозначных чисел 0..9
-DIGIT_TO_CODE = {
-    0: "Q0", 1: "Q1", 2: "Q2", 3: "Q3", 4: "Q4",
-    5: "Q5", 6: "Q6", 7: "Q7", 8: "Q8", 9: "Q9",
-}
+# Таблицы кодирования
+DIGIT_TO_Q = {0: "Q0", 1: "Q1", 2: "Q2", 3: "Q3", 4: "Q4",
+              5: "Q5", 6: "Q6", 7: "Q7", 8: "Q8", 9: "Q9"}
 
-# Обратная таблица: "Q0" -> 0, "Q1" -> 1, ...
-CODE_TO_DIGIT = {v: k for k, v in DIGIT_TO_CODE.items()}
+Q_TO_DIGIT = {v: k for k, v in DIGIT_TO_Q.items()}
 
 
-def parse_space_separated_numbers(text: str):
+def parse_space_numbers(text: str):
     """
-    Разбирает входной текст: числа, разделённые пробелами и/или переносами строк.
-    Возвращает список целых чисел.
-    Пример: "252 1 253 5 128 3" -> [252, 1, 253, 5, 128, 3]
+    Разбирает строку чисел, разделённых пробелами / переносами строк.
+    Возвращает список int.
     """
-    numbers = []
+    nums = []
     for token in text.split():
         token = token.strip()
         if not token:
             continue
         try:
-            numbers.append(int(token))
+            nums.append(int(token))
         except ValueError:
-            raise ValueError(f"Не удалось распознать число: '{token}'")
-    return numbers
+            raise ValueError(f"Не число: '{token}'")
+    return nums
 
 
-def encode_compact(numbers: list):
+def compress_to_compact(numbers: list):
     """
-    Кодирует список чисел в компактную «кортежную» строку:
-      - многозначные (>9)       — как есть
-      - однозначные  (0..9)     — Q0..Q9
-    Всё слитно, без пробелов.
-    Пример: [252, 1, 253, 5, 128, 3] -> "252Q1253Q5128Q3"
+    [252, 1, 253, 5, 128, 3]  ->  "252Q1253Q5128Q3"
+
+    Каждое однозначное число заменяется на Q-код,
+    многозначное — остаётся строкой. Всё сливается без пробелов.
     """
     parts = []
     for n in numbers:
         if 0 <= n <= 9:
-            parts.append(DIGIT_TO_CODE[n])
+            parts.append(DIGIT_TO_Q[n])
         else:
             parts.append(str(n))
     return "".join(parts)
 
 
-def decode_compact(compact: str):
+def decompact_to_numbers(compact: str):
     """
-    Обратное преобразование: "252Q1253Q5128Q3" -> [252, 1, 253, 5, 128, 3]
+    "252Q1253Q5128Q3"  ->  [252, 1, 253, 5, 128, 3]
     """
-    numbers = []
+    nums = []
     i = 0
     n = len(compact)
 
     while i < n:
         ch = compact[i]
 
-        # Проверяем, не начинается ли с "Q" двухсимвольный код
+        # Проверяем двухсимвольный код Qx
         if ch == "Q" and i + 1 < n:
             code = "Q" + compact[i + 1]
-            if code in CODE_TO_DIGIT:
-                numbers.append(CODE_TO_DIGIT[code])
+            if code in Q_TO_DIGIT:
+                nums.append(Q_TO_DIGIT[code])
                 i += 2
                 continue
 
-        # Иначе читаем многозначное число (возможно отрицательное)
+        # Иначе читаем обычное число (может начинаться с минуса)
         j = i
         if compact[j] == "-":
             j += 1
@@ -88,38 +98,34 @@ def decode_compact(compact: str):
             j += 1
         if j == i:
             raise ValueError(f"Неожиданный символ в позиции {i}: '{compact[i]}'")
-        numbers.append(int(compact[i:j]))
+        nums.append(int(compact[i:j]))
         i = j
 
-    return numbers
+    return nums
 
 
-# ------------------------------------------------------------
+# ============================================================
 #  БУФЕР ОБМЕНА / КОНТЕКСТНОЕ МЕНЮ
-# ------------------------------------------------------------
+# ============================================================
 
 def setup_clipboard_bindings(widget):
-    """Настроить привязки для копирования/вставки/вырезания и SelectAll."""
+    """Ctrl+C/V/X/A, Command+C/V/X/A, контекстное меню."""
 
     def gen(event_name):
         return lambda e: (widget.event_generate(event_name), "break")
 
-    # Windows/Linux: Ctrl
     widget.bind("<Control-c>", gen("<<Copy>>"))
     widget.bind("<Control-x>", gen("<<Cut>>"))
     widget.bind("<Control-v>", gen("<<Paste>>"))
     widget.bind("<Control-a>", lambda e: (widget.tag_add("sel", "1.0", "end"), "break"))
 
-    # macOS: Command
     widget.bind("<Command-c>", gen("<<Copy>>"))
     widget.bind("<Command-x>", gen("<<Cut>>"))
     widget.bind("<Command-v>", gen("<<Paste>>"))
     widget.bind("<Command-a>", lambda e: (widget.tag_add("sel", "1.0", "end"), "break"))
 
-    # При клике — ставим фокус в виджет
     widget.bind("<Button-1>", lambda e: widget.focus_set())
 
-    # Контекстное меню (правый клик)
     menu = tk.Menu(widget, tearoff=0)
     menu.add_command(label="Копировать", command=lambda: widget.event_generate("<<Copy>>"))
     menu.add_command(label="Вставить", command=lambda: widget.event_generate("<<Paste>>"))
@@ -133,16 +139,16 @@ def setup_clipboard_bindings(widget):
         finally:
             menu.grab_release()
 
-    widget.bind("<Button-3>", show_menu)  # Windows/Linux
-    widget.bind("<Button-2>", show_menu)  # macOS
+    widget.bind("<Button-3>", show_menu)
+    widget.bind("<Button-2>", show_menu)
 
 
-# ------------------------------------------------------------
+# ============================================================
 #  РАБОТА С ИЗОБРАЖЕНИЯМИ
-# ------------------------------------------------------------
+# ============================================================
 
 def load_image():
-    """Открывает файл изображения, показывает его и заполняет табло RGB."""
+    """Открыть файл изображения, показать и заполнить табло числами через пробел."""
     global image_data, current_width, current_height
     path = filedialog.askopenfilename(
         filetypes=[("Image files", "*.png;*.jpg;*.jpeg;*.bmp;*.gif"), ("All files", "*.*")]
@@ -159,33 +165,30 @@ def load_image():
     current_height, current_width = image_data.shape[:2]
     width_var.set(str(current_width))
 
-    # Показать изображение в новом окне
+    # Показать изображение
     win = tk.Toplevel(root)
-    win.title(f"Изображение — {path.split('/')[-1]}")
+    win.title(f"Изображение — {os.path.basename(path)}")
     canvas = tk.Canvas(win, width=img.width, height=img.height)
     canvas.pack()
     photo = ImageTk.PhotoImage(img)
     canvas.create_image(0, 0, anchor=tk.NW, image=photo)
     canvas_img_refs.append(photo)
 
-    # Заполнить текстовое поле числами через пробел
-    fill_text_from_image(image_data)
+    # Заполнить табло числами через пробел
+    fill_text_from_array(image_data)
 
 
-def fill_text_from_image(arr):
-    """Заполняет text_widget числами из массива arr (h,w,3) — подряд через пробел."""
+def fill_text_from_array(arr):
+    """arr (H,W,3) -> текст: 'R G B R G B ...' (row-major)."""
     h, w = arr.shape[:2]
-
-    max_cells_warn = 500000
     total = h * w
-    if total > max_cells_warn:
+    if total > 500_000:
         if not messagebox.askyesno(
             "Большое изображение",
-            f"Изображение содержит {total} пикселей ({total * 3} чисел). Это может замедлить интерфейс. Продолжить?",
+            f"{total} пикселей ({total * 3} чисел). Может тормозить. Продолжить?",
         ):
             return
 
-    # Собираем все числа подряд (row-major): R G B R G B ...
     flat = []
     for row in arr:
         for px in row:
@@ -194,43 +197,48 @@ def fill_text_from_image(arr):
     text_widget.config(state="normal")
     text_widget.delete("1.0", tk.END)
     text_widget.insert("1.0", " ".join(str(v) for v in flat))
-    # Оставляем текст доступным для редактирования
 
 
-def parse_rgb_text(text):
-    """
-    Парсит текст с RGB-числами (через пробелы) и возвращает список [R,G,B] триплетов.
-    """
-    numbers = parse_space_separated_numbers(text)
+def open_image_from_text():
+    """Парсит числа из табло и показывает изображение."""
+    txt = text_widget.get("1.0", tk.END)
 
+    # Пробуем распознать: либо обычные числа через пробел, либо сжатый формат
+    stripped = txt.strip()
+    if "Q" in stripped and " " not in stripped:
+        # Похоже на сжатый формат — разжимаем
+        try:
+            numbers = decompact_to_numbers(stripped)
+        except ValueError as e:
+            messagebox.showerror("Ошибка распаковки", str(e))
+            return
+    else:
+        try:
+            numbers = parse_space_numbers(txt)
+        except ValueError as e:
+            messagebox.showerror("Ошибка парсинга", str(e))
+            return
+
+    # Собираем триплеты
     if len(numbers) % 3 != 0:
-        raise ValueError(
-            f"Количество чисел ({len(numbers)}) не кратно 3. "
-            f"Каждый пиксель требует три значения R, G, B."
+        messagebox.showerror(
+            "Ошибка",
+            f"Количество чисел ({len(numbers)}) не кратно 3. Нужны триплеты R G B.",
         )
+        return
 
     pixels = []
     for i in range(0, len(numbers), 3):
         r, g, b = numbers[i], numbers[i + 1], numbers[i + 2]
         for v in (r, g, b):
             if v < 0 or v > 255:
-                raise ValueError(f"Пиксель {i // 3 + 1}: значение {v} вне диапазона 0–255")
+                messagebox.showerror(
+                    "Ошибка", f"Значение {v} вне диапазона 0–255 (триплет {i // 3 + 1})."
+                )
+                return
         pixels.append([r, g, b])
 
-    if not pixels:
-        raise ValueError("Не найдено ни одного RGB-триплета.")
-    return pixels
-
-
-def open_image_from_text():
-    """Парсит текст в табло и открывает окно с изображением на его основании."""
-    txt = text_widget.get("1.0", tk.END)
-    try:
-        pixels = parse_rgb_text(txt)
-    except ValueError as e:
-        messagebox.showerror("Ошибка парсинга", str(e))
-        return
-
+    # Ширина
     w_text = width_var.get().strip()
     if w_text:
         try:
@@ -238,7 +246,7 @@ def open_image_from_text():
             if w <= 0:
                 raise ValueError()
         except:
-            messagebox.showerror("Ошибка", "Поле ширины должно содержать положительное целое число.")
+            messagebox.showerror("Ошибка", "Ширина должна быть положительным целым числом.")
             return
     else:
         n = len(pixels)
@@ -248,13 +256,14 @@ def open_image_from_text():
         else:
             messagebox.showinfo(
                 "Уточнение",
-                "Ширина не указана и длина не является квадратом. Пожалуйста, укажите ширину.",
+                "Ширина не указана и количество пикселей не является квадратом. Укажите ширину.",
             )
             return
 
     if len(pixels) % w != 0:
         messagebox.showerror(
-            "Ошибка", f"Количество пикселей ({len(pixels)}) не делится на указанную ширину ({w})."
+            "Ошибка",
+            f"Количество пикселей ({len(pixels)}) не делится на ширину ({w}).",
         )
         return
 
@@ -272,94 +281,78 @@ def open_image_from_text():
     canvas_img_refs.append(photo)
 
 
-# ------------------------------------------------------------
-#  КНОПКИ ОБРАБОТКИ ТЕКСТА
-# ------------------------------------------------------------
+# ============================================================
+#  КНОПКИ
+# ============================================================
 
 def clear_text():
     text_widget.config(state="normal")
     text_widget.delete("1.0", tk.END)
 
 
-def save_text_to_file():
-    """Сохраняет содержимое текстового поля в выбранный файл (.txt)."""
+def save_text():
     txt = text_widget.get("1.0", tk.END).strip()
     if not txt:
-        messagebox.showwarning("Пусто", "Нечего сохранять — текстовое поле пусто.")
+        messagebox.showwarning("Пусто", "Нечего сохранять.")
         return
-
-    file_path = filedialog.asksaveasfilename(
+    path = filedialog.asksaveasfilename(
         defaultextension=".txt",
         filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
-        title="Сохранить данные как...",
+        title="Сохранить как...",
     )
-    if not file_path:
+    if not path:
         return
-
     try:
-        with open(file_path, "w", encoding="utf-8") as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write(txt)
-        messagebox.showinfo("Сохранено", f"Файл сохранён:\n{file_path}")
+        messagebox.showinfo("Сохранено", f"Файл сохранён:\n{path}")
     except Exception as e:
-        messagebox.showerror("Ошибка", f"Не удалось сохранить файл:\n{e}")
+        messagebox.showerror("Ошибка", f"Не удалось сохранить:\n{e}")
 
 
-def compress_to_compact():
-    """
-    Сжимает содержимое текстового поля:
-    числа через пробел -> компактный кортежный формат (без пробелов).
-    """
+def do_compress():
+    """Сжать: числа через пробел -> компактный кортежный формат."""
     txt = text_widget.get("1.0", tk.END).strip()
     if not txt:
-        messagebox.showwarning("Пусто", "Нечего сжимать — текстовое поле пусто.")
+        messagebox.showwarning("Пусто", "Нечего сжимать.")
         return
-
     try:
-        numbers = parse_space_separated_numbers(txt)
+        nums = parse_space_numbers(txt)
     except ValueError as e:
-        messagebox.showerror("Ошибка парсинга", str(e))
+        messagebox.showerror("Ошибка", str(e))
         return
 
-    compact = encode_compact(numbers)
+    result = compress_to_compact(nums)
 
     text_widget.config(state="normal")
     text_widget.delete("1.0", tk.END)
-    text_widget.insert("1.0", compact)
+    text_widget.insert("1.0", result)
 
 
-def decompress_from_compact():
-    """
-    Разжимает компактный кортежный формат обратно в числа через пробел.
-    """
+def do_decompress():
+    """Разжать: кортежный формат -> числа через пробел."""
     txt = text_widget.get("1.0", tk.END).strip()
     if not txt:
-        messagebox.showwarning("Пусто", "Нечего разжимать — текстовое поле пусто.")
+        messagebox.showwarning("Пусто", "Нечего разжимать.")
         return
-
     try:
-        numbers = decode_compact(txt)
+        nums = decompact_to_numbers(txt)
     except ValueError as e:
-        messagebox.showerror("Ошибка распаковки", str(e))
+        messagebox.showerror("Ошибка", str(e))
         return
 
-    plain = " ".join(str(n) for n in numbers)
+    result = " ".join(str(n) for n in nums)
 
     text_widget.config(state="normal")
     text_widget.delete("1.0", tk.END)
-    text_widget.insert("1.0", plain)
+    text_widget.insert("1.0", result)
 
 
 def split_image_to_rgb_lents():
     """
-    Выбирает изображение, нарезает его на ленты указанной ширины (по горизонтали,
-    row-major), затем сохраняет на рабочий стол в папку 'RGB_Lents' три .txt файла:
-    - Lent_1.txt: каждый 1-й индекс (R)
-    - Lent_2.txt: каждый 2-й индекс (G)
-    - Lent_3.txt: каждый 3-й индекс (B)
-
-    Порядок обхода пикселей: строка за строкой, слева направо.
-    Если ширина ленты меньше ширины изображения — строки режутся на несколько лент,
-    которые выкладываются последовательно одна за другой.
+    Выбирает изображение, нарезает на ленты шириной lent_width,
+    сохраняет в RGB_Lents на рабочем столе:
+      Lent_1.txt — R, Lent_2.txt — G, Lent_3.txt — B.
     """
     path = filedialog.askopenfilename(
         filetypes=[("Image files", "*.png;*.jpg;*.jpeg;*.bmp;*.gif"), ("All files", "*.*")],
@@ -377,111 +370,93 @@ def split_image_to_rgb_lents():
     arr = np.array(img)
     img_h, img_w = arr.shape[:2]
 
-    width_str = width_var.get().strip()
-    if not width_str:
-        messagebox.showerror("Ошибка", "Укажите ширину ленты в поле «Ширина (px)».")
+    w_str = width_var.get().strip()
+    if not w_str:
+        messagebox.showerror("Ошибка", "Укажите ширину ленты.")
         return
-
     try:
-        lent_width = int(width_str)
+        lent_width = int(w_str)
         if lent_width <= 0:
             raise ValueError()
     except:
-        messagebox.showerror("Ошибка", "Поле ширины должно содержать положительное целое число.")
+        messagebox.showerror("Ошибка", "Ширина ленты — положительное целое число.")
         return
 
     if img_w % lent_width != 0:
         messagebox.showerror(
             "Ошибка",
-            f"Ширина изображения ({img_w}) не делится на ширину ленты ({lent_width}) без остатка.\n"
-            "Выберите другую ширину ленты.",
+            f"Ширина изображения ({img_w}) не делится на ширину ленты ({lent_width}).",
         )
         return
 
-    r_values = []
-    g_values = []
-    b_values = []
-
+    r_vals, g_vals, b_vals = [], [], []
     blocks_per_row = img_w // lent_width
 
     for row_idx in range(img_h):
         for block_idx in range(blocks_per_row):
-            start_col = block_idx * lent_width
-            end_col = start_col + lent_width
-            block = arr[row_idx, start_col:end_col, :]
-
+            sc = block_idx * lent_width
+            ec = sc + lent_width
+            block = arr[row_idx, sc:ec, :]
             for px in block:
-                r_values.append(int(px[0]))
-                g_values.append(int(px[1]))
-                b_values.append(int(px[2]))
+                r_vals.append(int(px[0]))
+                g_vals.append(int(px[1]))
+                b_vals.append(int(px[2]))
 
     desktop = os.path.join(os.path.expanduser("~"), "Desktop")
     save_dir = os.path.join(desktop, "RGB_Lents")
     os.makedirs(save_dir, exist_ok=True)
 
-    filenames = {
-        "Lent_1.txt": r_values,
-        "Lent_2.txt": g_values,
-        "Lent_3.txt": b_values,
-    }
-
-    for fname, values in filenames.items():
-        full_path = os.path.join(save_dir, fname)
-        with open(full_path, "w", encoding="utf-8") as f:
+    for fname, values in [
+        ("Lent_1.txt", r_vals),
+        ("Lent_2.txt", g_vals),
+        ("Lent_3.txt", b_vals),
+    ]:
+        with open(os.path.join(save_dir, fname), "w", encoding="utf-8") as f:
             f.write("\n".join(str(v) for v in values))
 
     messagebox.showinfo(
         "Готово",
-        f"Три текстовых файла сохранены в папку:\n{save_dir}\n\n"
-        f"Файлы:\n"
-        f" Lent_1.txt — канал R\n"
-        f" Lent_2.txt — канал G\n"
-        f" Lent_3.txt — канал B\n\n"
-        f"Всего значений в каждом файле: {len(r_values)}\n"
-        f"Ширина ленты: {lent_width} px",
+        f"Файлы сохранены в:\n{save_dir}\n\n"
+        f"Lent_1.txt — R\nLent_2.txt — G\nLent_3.txt — B\n"
+        f"Значений в каждом: {len(r_vals)}\nШирина ленты: {lent_width} px",
     )
 
 
-# ------------------------------------------------------------
+# ============================================================
 #  GUI
-# ------------------------------------------------------------
+# ============================================================
 
 root = tk.Tk()
 root.title("RGB редактор — кортежное сжатие")
-root.geometry("900x700")
+root.geometry("950x700")
 
 top_frame = tk.Frame(root)
 top_frame.pack(fill=tk.X, padx=8, pady=6)
 
-load_btn = tk.Button(top_frame, text="Загрузить изображение", command=load_image)
-load_btn.pack(side=tk.LEFT, padx=(0, 6))
+# --- Ряд 1: основные кнопки ---
+row1 = tk.Frame(top_frame)
+row1.pack(fill=tk.X)
 
-width_label = tk.Label(top_frame, text="Ширина (px):")
-width_label.pack(side=tk.LEFT)
+tk.Button(row1, text="Загрузить изображение", command=load_image).pack(side=tk.LEFT, padx=(0, 6))
+tk.Label(row1, text="Ширина (px):").pack(side=tk.LEFT)
 width_var = tk.StringVar()
-width_entry = tk.Entry(top_frame, textvariable=width_var, width=8)
-width_entry.pack(side=tk.LEFT, padx=(4, 12))
+tk.Entry(row1, textvariable=width_var, width=8).pack(side=tk.LEFT, padx=(4, 12))
+tk.Button(row1, text="Открыть изображение", command=open_image_from_text).pack(side=tk.LEFT, padx=(0, 6))
+tk.Button(row1, text="Очистить", command=clear_text).pack(side=tk.LEFT, padx=(0, 6))
+tk.Button(row1, text="Сохранить .txt", command=save_text).pack(side=tk.LEFT, padx=(0, 12))
 
-open_from_text_btn = tk.Button(top_frame, text="Открыть изображение из RGB", command=open_image_from_text)
-open_from_text_btn.pack(side=tk.LEFT, padx=(0, 6))
+# --- Сжатие / Разжатие (выделены визуально) ---
+tk.Button(row1, text="▶ Сжать (в Q-кортеж)", command=do_compress,
+          bg="#e0e0ff").pack(side=tk.LEFT, padx=(0, 6))
+tk.Button(row1, text="◀ Разжать (из Q-кортежа)", command=do_decompress,
+          bg="#ffe0e0").pack(side=tk.LEFT, padx=(0, 6))
 
-clear_btn = tk.Button(top_frame, text="Очистить табло", command=clear_text)
-clear_btn.pack(side=tk.LEFT, padx=(0, 6))
+# --- Ряд 2: ленты ---
+row2 = tk.Frame(top_frame)
+row2.pack(fill=tk.X, pady=(6, 0))
+tk.Button(row2, text="Разделить на RGB-ленты", command=split_image_to_rgb_lents).pack(side=tk.LEFT)
 
-save_btn = tk.Button(top_frame, text="Сохранить как .txt", command=save_text_to_file)
-save_btn.pack(side=tk.LEFT, padx=(0, 6))
-
-# --- НОВЫЕ КНОПКИ ---
-compress_btn = tk.Button(top_frame, text="Сжать (в кортеж)", command=compress_to_compact)
-compress_btn.pack(side=tk.LEFT, padx=(0, 6))
-
-decompress_btn = tk.Button(top_frame, text="Разжать (из кортежа)", command=decompress_from_compact)
-decompress_btn.pack(side=tk.LEFT, padx=(0, 6))
-
-split_btn = tk.Button(top_frame, text="Разделить на RGB-ленты", command=split_image_to_rgb_lents)
-split_btn.pack(side=tk.LEFT)
-
-# Текстовая область
+# --- Текстовая область ---
 text_frame = tk.Frame(root)
 text_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
 
@@ -495,18 +470,17 @@ text_widget.pack(fill=tk.BOTH, expand=True)
 
 setup_clipboard_bindings(text_widget)
 
-# Подсказка
-hint = tk.Label(
+# --- Подсказка ---
+tk.Label(
     root,
     text=(
-        "Формат ввода: числа через пробел (R G B R G B ...). "
-        "«Сжать» — переводит в кортежный формат (252Q1253Q5...). "
-        "«Разжать» — обратно в числа через пробел. "
+        "Формат ввода: числа через пробел (R G B R G B ...).\n"
+        "«Сжать» — однозначные (0–9) → Q0..Q9, пробелы убираются. Пример: 252 1 5 → 252Q1Q5\n"
+        "«Разжать» — обратно: 252Q1Q5 → 252 1 5\n"
         "Если поле «Ширина» пустое — пытаемся подобрать квадрат."
     ),
     anchor="w",
     justify="left",
-)
-hint.pack(fill=tk.X, padx=8, pady=(0, 8))
+).pack(fill=tk.X, padx=8, pady=(0, 8))
 
 root.mainloop()
